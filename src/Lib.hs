@@ -6,6 +6,7 @@ import           Data.Char            (chr, ord)
 import           Data.List.Split      (chunksOf)
 import qualified Data.Vector          as V
 import qualified Data.Word            as W
+import           Debug.Trace
 
 -- == architecture ==
 -- three storage regions
@@ -25,6 +26,10 @@ data Val = Lit Int | Reg Int
     deriving (Eq, Show)
 
 data Op = Halt
+        | Set Val Val
+        | Jmp Val
+        | Jt Val Val
+        | Jf Val Val
         | Out Val
         | Noop
     deriving (Eq, Show)
@@ -57,14 +62,20 @@ getWords = do
 readOp :: State -> Int -> (Op, Int)
 readOp s pc = let m = mem s in
     case m V.! pc of
-        0  -> (Halt, 1)
-        19 -> (Out $ parseVal (m V.! (pc + 1)), 2)
-        21 -> (Noop, 1)
+        0         -> (Halt, 1)
+        1         -> (Set (parseVal s 1) (parseVal s 2), 3)
+        6         -> (Jmp $ parseVal s 1, 0)
+        7         -> (Jt (parseVal s 1) (parseVal s 2), 3)
+        8         -> (Jf (parseVal s 1) (parseVal s 2), 3)
+        19        -> (Out $ parseVal s 1, 2)
+        21        -> (Noop, 1)
+        otherwise -> error (show $ m V.! pc)
 
-parseVal :: Int -> Val
-parseVal v
-    | v < maxLit = Lit v
-    | otherwise = Reg $ v - maxLit
+parseVal :: State -> Int -> Val
+parseVal (State m _ _ p _ _ _) i =
+    let v = m V.! (p + i) in
+        if v < maxLit then Lit v
+        else Reg $ v - maxLit
 
 decodeVal :: State -> Val -> Int
 decodeVal _ (Lit i)                      = i
@@ -86,6 +97,10 @@ setPc (State m r st _ o i s) j =
 incPc :: State -> Int -> State
 incPc s j = setPc s (j + pc s)
 
+setReg :: State -> Val -> Int -> State
+setReg (State m rs st p o i s) (Reg r) v =
+    State m (rs V.// [(r, v)]) st p o i s
+
 setStatus :: State -> Status -> State
 setStatus (State m r st p o i _) s =
     State m r st p o i s
@@ -104,8 +119,17 @@ setInput (State m r st p o _ s) i =
 
 execOp :: State -> (Op, Int) -> State
 execOp s (Halt, n)  = setStatus s Halted
+execOp s (Set a b, n) = incPc (setReg s a (decodeVal s b)) n
+execOp s (Jmp v, _) = setPc s (decodeVal s v)
+execOp s (Jt a b, n) = if decodeVal s a /= 0
+                       then setPc s (decodeVal s b)
+                       else incPc s n
+execOp s (Jf a b, n) = if decodeVal s a == 0
+                       then setPc s (decodeVal s b)
+                       else incPc s n
 execOp s (Out c, n) = setOut (incPc s n) (decodeVal s c)
 execOp s (Noop, n)  = incPc s n
+execOp _ op         = error (show op)
 
 stepVm :: State -> State
 stepVm s = execOp s (readOp s (pc s))
