@@ -4,7 +4,7 @@ import qualified Data.Binary.Get      as G
 import           Data.Bits
 import qualified Data.ByteString.Lazy as BS
 import           Data.Char            (chr, ord)
-import qualified Data.Vector          as V
+import qualified Data.Vector.Unboxed  as V
 import           Debug.Trace
 
 -- == architecture ==
@@ -232,4 +232,4 @@ runVm = do
                                go $ stepVm a
             Reading -> do
                 l <- getLine
-                go $ setInput s l
+                go $ setStatus (setInput s (l ++ "\n")) Running
