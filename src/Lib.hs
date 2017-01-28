@@ -1,11 +1,10 @@
 module Lib ( runVm ) where
 
 import qualified Data.Binary.Get      as G
+import           Data.Bits
 import qualified Data.ByteString.Lazy as BS
 import           Data.Char            (chr, ord)
-import           Data.List.Split      (chunksOf)
 import qualified Data.Vector          as V
-import qualified Data.Word            as W
 import           Debug.Trace
 
 -- == architecture ==
@@ -27,10 +26,25 @@ data Val = Lit Int | Reg Int
 
 data Op = Halt
         | Set Val Val
+        | Push Val
+        | Pop Val
+        | Equ Val Val Val
+        | Gt Val Val Val
         | Jmp Val
         | Jt Val Val
         | Jf Val Val
+        | Add Val Val Val
+        | Mult Val Val Val
+        | Mod Val Val Val
+        | And Val Val Val
+        | Or Val Val Val
+        | Not Val Val
+        | Rmem Val Val
+        | Wmem Val Val
+        | Call Val
+        | Ret
         | Out Val
+        | In Val
         | Noop
     deriving (Eq, Show)
 
@@ -45,7 +59,8 @@ data Status = Running | Reading | Halted
 prog :: IO (V.Vector Int)
 prog = do
     f <- BS.readFile "challenge.bin"
-    return $ V.fromList $ G.runGet getWords f
+    let p = V.fromList $ G.runGet getWords f
+    return $ p V.++ V.replicate (maxLit - V.length p) 0
 
 -- each number is stored as a 16-bit little-endian pair
 -- (low byte, high byte)
@@ -64,10 +79,25 @@ readOp s pc = let m = mem s in
     case m V.! pc of
         0         -> (Halt, 1)
         1         -> (Set (parseVal s 1) (parseVal s 2), 3)
+        2         -> (Push (parseVal s 1), 2)
+        3         -> (Pop (parseVal s 1), 2)
+        4         -> (Equ (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
+        5         -> (Gt (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
         6         -> (Jmp $ parseVal s 1, 0)
         7         -> (Jt (parseVal s 1) (parseVal s 2), 3)
         8         -> (Jf (parseVal s 1) (parseVal s 2), 3)
+        9         -> (Add (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
+        10        -> (Mult (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
+        11        -> (Mod (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
+        12        -> (And (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
+        13        -> (Or (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
+        14        -> (Not (parseVal s 1) (parseVal s 2), 3)
+        15        -> (Rmem (parseVal s 1) (parseVal s 2), 3)
+        16        -> (Wmem (parseVal s 1) (parseVal s 2), 3)
+        17        -> (Call (parseVal s 1), 2)
+        18        -> (Ret, 1)
         19        -> (Out $ parseVal s 1, 2)
+        20        -> (In $ parseVal s 1, 2)
         21        -> (Noop, 1)
         otherwise -> error (show $ m V.! pc)
 
@@ -77,9 +107,9 @@ parseVal (State m _ _ p _ _ _) i =
         if v < maxLit then Lit v
         else Reg $ v - maxLit
 
-decodeVal :: State -> Val -> Int
-decodeVal _ (Lit i)                      = i
-decodeVal (State _ rs _ _ _ _ _) (Reg i) = rs V.! i
+deVal :: State -> Val -> Int
+deVal _ (Lit i)                      = i
+deVal (State _ rs _ _ _ _ _) (Reg i) = rs V.! i
 
 initState :: V.Vector Int -> State
 initState prog = State prog
@@ -105,6 +135,22 @@ setStatus :: State -> Status -> State
 setStatus (State m r st p o i _) s =
     State m r st p o i s
 
+push :: State -> Int -> State
+push (State m r st p o i s) v =
+    State m r (v : st) p o i s
+
+pop :: State -> (State, Int)
+pop (State m r (v:st) p o i s) =
+    (State m r st p o i s, v)
+
+rmem :: State -> Val -> Int -> State
+rmem (State m r st p o i s) (Reg a) from = State m nr st p o i s
+    where nr = r V.// [(a, m V.! from)]
+
+wmem :: State -> Int -> Int -> State
+wmem (State m r st p o i s) to v = State nm r st p o i s
+    where nm = m V.// [(to, v)]
+
 setOut :: State -> Int -> State
 setOut (State m r st p _ i s) o =
     State m r st p (Just $ chr o) i s
@@ -113,21 +159,55 @@ clearOut :: State -> State
 clearOut (State m r st p _ i s) =
     State m r st p Nothing i s
 
+readChar :: State -> Val -> State
+readChar (State m rs st p o (i:is) s) (Reg r) =
+    State m (rs V.// [(r, ord i)]) st p o is s
+
 setInput :: State -> String -> State
 setInput (State m r st p o _ s) i =
     State m r st p o i s
 
 execOp :: State -> (Op, Int) -> State
 execOp s (Halt, n)  = setStatus s Halted
-execOp s (Set a b, n) = incPc (setReg s a (decodeVal s b)) n
-execOp s (Jmp v, _) = setPc s (decodeVal s v)
-execOp s (Jt a b, n) = if decodeVal s a /= 0
-                       then setPc s (decodeVal s b)
+execOp s (Set a b, n) = incPc (setReg s a (deVal s b)) n
+execOp s (Push a, n) = incPc (push s (deVal s a)) n
+execOp s (Pop a, n) = let (ns, b) = pop s in
+                         incPc (setReg ns a b) n
+execOp s (Equ a b c, n) =
+    incPc (setReg s a (if (deVal s b) == (deVal s c) then 1 else 0)) n
+execOp s (Gt a b c, n) =
+    incPc (setReg s a (if (deVal s b) > (deVal s c) then 1 else 0)) n
+execOp s (Jmp v, _) = setPc s (deVal s v)
+execOp s (Jt a b, n) = if deVal s a /= 0
+                       then setPc s (deVal s b)
                        else incPc s n
-execOp s (Jf a b, n) = if decodeVal s a == 0
-                       then setPc s (decodeVal s b)
+execOp s (Jf a b, n) = if deVal s a == 0
+                       then setPc s (deVal s b)
                        else incPc s n
-execOp s (Out c, n) = setOut (incPc s n) (decodeVal s c)
+execOp s (Add a b c, n) =
+    incPc (setReg s a ((deVal s b + deVal s c) `mod` maxLit)) n
+execOp s (Mult a b c, n) =
+    incPc (setReg s a ((deVal s b * deVal s c) `mod` maxLit)) n
+execOp s (Mod a b c, n) =
+    incPc (setReg s a (deVal s b `mod` deVal s c)) n
+execOp s (And a b c, n) = incPc (setReg s a (deVal s b .&. deVal s c)) n
+execOp s (Or a b c, n) = incPc (setReg s a (deVal s b .|. deVal s c)) n
+execOp s (Not a b, n) = let neg = complement (deVal s b) .&. 32767
+                        in
+                            incPc (setReg s a neg) n
+execOp s (Rmem a b, n) = incPc (rmem s a (deVal s b)) n
+execOp s (Wmem a b, n) = incPc (wmem s (deVal s a) (deVal s b)) n
+execOp s (Call a, n) = let t = deVal s a in
+                           setPc (push s (n + pc s)) t
+execOp s (Ret, n) = if null $ stack s
+                    then setStatus s Halted
+                    else let (ns, b) = pop s
+                         in
+                             setPc ns b
+execOp s (Out c, n) = setOut (incPc s n) (deVal s c)
+execOp s (In c, n) = if null $ inBuf s
+                     then setStatus s Reading
+                     else incPc (readChar s c) n
 execOp s (Noop, n)  = incPc s n
 execOp _ op         = error (show op)
 
