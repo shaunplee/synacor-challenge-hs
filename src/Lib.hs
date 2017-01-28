@@ -60,6 +60,8 @@ prog :: IO (V.Vector Int)
 prog = do
     f <- BS.readFile "challenge.bin"
     let p = V.fromList $ G.runGet getWords f
+    -- the binary doesn't take up the full memory, so zero pad to get
+    -- the full 15 bit address space
     return $ p V.++ V.replicate (maxLit - V.length p) 0
 
 -- each number is stored as a 16-bit little-endian pair
@@ -101,11 +103,13 @@ readOp s pc = let m = mem s in
         21        -> (Noop, 1)
         otherwise -> error (show $ m V.! pc)
 
+-- numbers 0..32767 mean a literal value
+-- numbers 32768..32775 instead mean registers 0..7
 parseVal :: State -> Int -> Val
 parseVal (State m _ _ p _ _ _) i =
     let v = m V.! (p + i) in
         if v < maxLit then Lit v
-        else Reg $ v - maxLit
+        else Reg $ v `mod` maxLit
 
 deVal :: State -> Val -> Int
 deVal _ (Lit i)                      = i
@@ -209,7 +213,6 @@ execOp s (In c, n) = if null $ inBuf s
                      then setStatus s Reading
                      else incPc (readChar s c) n
 execOp s (Noop, n)  = incPc s n
-execOp _ op         = error (show op)
 
 stepVm :: State -> State
 stepVm s = execOp s (readOp s (pc s))
