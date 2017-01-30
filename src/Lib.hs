@@ -4,8 +4,11 @@ import qualified Data.Binary.Get      as G
 import           Data.Bits
 import qualified Data.ByteString.Lazy as BS
 import           Data.Char            (chr, ord)
+import           Data.Serialize
 import qualified Data.Vector.Unboxed  as V
 import           Debug.Trace
+import           System.IO            (hFlush, stdout)
+
 
 -- == architecture ==
 -- three storage regions
@@ -19,7 +22,7 @@ data State = State { mem    :: V.Vector Int -- memory with 15-bit address space
                    , inBuf  :: String
                    , status :: Status
                    }
-    deriving (Eq, Show)
+    deriving (Eq, Show, Read)
 
 data Val = Lit Int | Reg Int
     deriving (Eq, Show)
@@ -46,6 +49,7 @@ data Op = Halt
         | Out Val
         | In Val
         | Noop
+        | Data Val
     deriving (Eq, Show)
 
 -- all numbers are unsigned integers 0..32767 (15-bit)
@@ -54,7 +58,7 @@ maxLit :: Int
 maxLit = 32768
 
 data Status = Running | Reading | Halted
-    deriving (Eq, Show)
+    deriving (Eq, Show, Read)
 
 prog :: IO (V.Vector Int)
 prog = do
@@ -77,36 +81,36 @@ getWords = do
             return (fromEnum w : ws)
 
 readOp :: State -> Int -> (Op, Int)
-readOp s pc = let m = mem s in
-    case m V.! pc of
-        0         -> (Halt, 1)
-        1         -> (Set (parseVal s 1) (parseVal s 2), 3)
-        2         -> (Push (parseVal s 1), 2)
-        3         -> (Pop (parseVal s 1), 2)
-        4         -> (Equ (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        5         -> (Gt (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        6         -> (Jmp $ parseVal s 1, 0)
-        7         -> (Jt (parseVal s 1) (parseVal s 2), 3)
-        8         -> (Jf (parseVal s 1) (parseVal s 2), 3)
-        9         -> (Add (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        10        -> (Mult (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        11        -> (Mod (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        12        -> (And (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        13        -> (Or (parseVal s 1) (parseVal s 2) (parseVal s 3), 4)
-        14        -> (Not (parseVal s 1) (parseVal s 2), 3)
-        15        -> (Rmem (parseVal s 1) (parseVal s 2), 3)
-        16        -> (Wmem (parseVal s 1) (parseVal s 2), 3)
-        17        -> (Call (parseVal s 1), 2)
-        18        -> (Ret, 1)
-        19        -> (Out $ parseVal s 1, 2)
-        20        -> (In $ parseVal s 1, 2)
-        21        -> (Noop, 1)
-        otherwise -> error (show $ m V.! pc)
+readOp s p = let m = mem s in
+    case m V.! p of
+        0  -> (Halt, 1)
+        1  -> (Set (parseVal s p 1) (parseVal s p 2), 3)
+        2  -> (Push (parseVal s p 1), 2)
+        3  -> (Pop (parseVal s p 1), 2)
+        4  -> (Equ (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        5  -> (Gt (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        6  -> (Jmp $ parseVal s p 1, 2)
+        7  -> (Jt (parseVal s p 1) (parseVal s p 2), 3)
+        8  -> (Jf (parseVal s p 1) (parseVal s p 2), 3)
+        9  -> (Add (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        10 -> (Mult (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        11 -> (Mod (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        12 -> (And (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        13 -> (Or (parseVal s p 1) (parseVal s p 2) (parseVal s p 3), 4)
+        14 -> (Not (parseVal s p 1) (parseVal s p 2), 3)
+        15 -> (Rmem (parseVal s p 1) (parseVal s p 2), 3)
+        16 -> (Wmem (parseVal s p 1) (parseVal s p 2), 3)
+        17 -> (Call (parseVal s p 1), 2)
+        18 -> (Ret, 1)
+        19 -> (Out $ parseVal s p 1, 2)
+        20 -> (In $ parseVal s p 1, 2)
+        21 -> (Noop, 1)
+        _  -> (Data $ parseVal s p 1, 1)
 
 -- numbers 0..32767 mean a literal value
 -- numbers 32768..32775 instead mean registers 0..7
-parseVal :: State -> Int -> Val
-parseVal (State m _ _ p _ _ _) i =
+parseVal :: State -> Int -> Int -> Val
+parseVal (State m _ _ _ _ _ _) p i =
     let v = m V.! (p + i) in
         if v < maxLit then Lit v
         else Reg $ v `mod` maxLit
@@ -221,18 +225,74 @@ runVm :: IO ()
 runVm = do
     p <- prog
     go (initState p)
-    where
-        go s = case status s of
-            Halted -> return ()
-            Running -> let ns = case outBuf s of
-                               Just c -> do
-                                   putChar c
-                                   return $ clearOut s
-                               Nothing -> return s
-                       in
-                           do
-                               a <- ns
-                               go $ stepVm a
-            Reading -> do
-                l <- getLine
-                go $ setStatus (setInput s (l ++ "\n")) Running
+  where
+    go s = case status s of
+        Halted -> return ()
+        Running -> let ns = case outBuf s of
+                           Just c -> do
+                               putChar c
+                               return $ clearOut s
+                           Nothing -> return s
+                   in do
+                       a <- ns
+                       go $ stepVm a
+        Reading -> do
+            l <- getLine
+            if l == ":debug"
+                then do
+                    putStrLn "Entering debug mode..."
+                    ds <- debugMode $ return s
+                    putStrLn "Exiting debug mode..."
+                    go ds
+                else go $ setStatus (setInput s (l ++ "\n")) Running
+
+debugMode :: IO State -> IO State
+debugMode is = do
+    putStr "Debug> "
+    hFlush stdout
+    l <- getLine
+    case l of
+        "exit" -> is
+        "save" -> do
+            handleSave is
+            debugMode is
+        "load" -> do
+            a <- handleLoad is
+            debugMode $ return a
+        "dump" -> do
+            handleDump is
+            debugMode is
+        _ -> do
+            putStrLn "I don't understand"
+            debugMode is
+
+handleSave :: IO State -> IO ()
+handleSave is = do
+    putStr "File name to save state into: "
+    hFlush stdout
+    f <- getLine
+    s <- is
+    writeFile f (show s)
+    return ()
+
+handleLoad :: IO State -> IO State
+handleLoad is = do
+    putStr "File name to load: "
+    hFlush stdout
+    f <- getLine
+    g <- readFile f
+    let ns = read g
+    return ns
+
+handleDump :: IO State -> IO ()
+handleDump is = let dumpMem :: State -> Int -> [String]
+                    dumpMem s p = if p >= (V.length $ mem s)
+                                  then []
+                                  else let (op, n) = readOp s p
+                                       in
+                                           (show p ++ ": " ++ show op ++ "\n") :
+                                               dumpMem s (p + n)
+                in do
+                    s <- is
+                    writeFile "mem-dump" $ concat $ dumpMem s 0
+                    return ()
