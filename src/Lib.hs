@@ -238,13 +238,14 @@ runVm = do
                        go $ stepVm a
         Reading -> do
             l <- getLine
-            if l == ":debug"
-                then do
+            case l of
+                ":debug" -> do
                     putStrLn "Entering debug mode..."
                     ds <- debugMode $ return s
                     putStrLn "Exiting debug mode..."
                     go ds
-                else go $ setStatus (setInput s (l ++ "\n")) Running
+                "_fix_teleporter" -> go $ fixTeleporter s
+                _ -> go $ setStatus (setInput s (l ++ "\n")) Running
 
 debugMode :: IO State -> IO State
 debugMode is = do
@@ -296,3 +297,10 @@ handleDump is = let dumpMem :: State -> Int -> [String]
                     s <- is
                     writeFile "mem-dump" $ concat $ dumpMem s 0
                     return ()
+
+fixTeleporter :: State -> State
+fixTeleporter s = let a = setReg s (Reg 7) 25734
+                      b = wmem a 5489 21
+                      c = wmem b 5490 21
+                  in
+                      wmem c 5493 6
