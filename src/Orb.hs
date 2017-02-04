@@ -1,8 +1,5 @@
 module Orb where
 
-import qualified Data.Set    as S
-import           Debug.Trace
-
 data Space = Op Operation
            | Val Int
     deriving Show
